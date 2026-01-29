@@ -1,0 +1,10 @@
+# 라이브러리 폴더
+node_modules/
+
+# 빌드 결과물 (용량이 크고 소스만 있으면 언제든 다시 만들 수 있음)
+dist/
+*.exe
+
+# 로그 및 기타 설정 파일
+npm-debug.log*
+.DS_Store

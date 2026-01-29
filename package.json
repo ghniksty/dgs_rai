@@ -1,0 +1,18 @@
+{
+  "name": "dgs_rai",
+  "version": "1.0.0",
+  "main": "index.js",
+  "bin": "index.js",
+  "scripts": {
+    "build": "pkg . --public-packages \"*\" --public"
+  },
+  "pkg": {
+    "assets": [
+      "index.js"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "dist"
+  }
+}
