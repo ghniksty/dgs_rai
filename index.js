@@ -3,52 +3,60 @@ const { promisify } = require('util');
 const readline = require('readline');
 
 const execAsync = promisify(exec);
+
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
 });
 
-const UNINSTALL_PATH = 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall';
+// 상수 관리
 const COMPAT_PATH = 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers';
+const UNINSTALL_LOCATIONS = [
+    'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
+];
 
-// 1. 스타터 설치 정보 확인 (reg query 사용)
+/**
+ * 1. 스타터 설치 정보 및 경로 확인
+ * chcp 65001을 사용하여 한글 검색어 인코딩 문제를 해결합니다.
+ */
 async function getStarterInfo() {
-    try {
-        // 1. Uninstall 경로 하위의 모든 서브키 목록을 가져옵니다.
-        const { stdout: keysStdout } = await execAsync(`reg query "${UNINSTALL_PATH}"`);
-        const keys = keysStdout.split('\r\n').filter(line => line.trim().startsWith('HKEY_LOCAL_MACHINE'));
+    for (const rootPath of UNINSTALL_LOCATIONS) {
+        try {
+            // 한글 검색을 위해 UTF-8 환경(65001) 강제 설정
+            const searchCmd = `chcp 65001 > nul && reg query "${rootPath}" /s /f "Daum게임 스타터" /d /reg:64`;
+            const { stdout } = await execAsync(searchCmd);
 
-        for (const key of keys) {
-            try {
-                // 2. 각 서브키의 DisplayName 값을 확인합니다.
-                const { stdout: detailStdout } = await execAsync(`reg query "${key}" /v "DisplayName"`);
-                
-                // 정확히 "Daum게임 스타터"인지 확인
-                if (detailStdout.includes('Daum게임 스타터')) {
-                    // 3. 일치한다면 DisplayIcon 값을 가져옵니다.
-                    const { stdout: iconStdout } = await execAsync(`reg query "${key}" /v "DisplayIcon"`);
-                    const iconMatch = iconStdout.match(/DisplayIcon\s+REG_SZ\s+(.+)/i);
-                    
+            const lines = stdout.split('\r\n');
+            const foundKeyLine = lines.find(line => line.trim().startsWith('HKEY_LOCAL_MACHINE'));
+
+            if (foundKeyLine) {
+                const targetKey = foundKeyLine.trim();
+                const { stdout: iconStdout } = await execAsync(`chcp 65001 > nul && reg query "${targetKey}" /v "DisplayIcon" /reg:64`);
+                const iconMatch = iconStdout.match(/DisplayIcon\s+REG_SZ\s+(.+)/i);
+
+                if (iconMatch) {
                     return {
                         installed: true,
-                        iconPath: iconMatch ? iconMatch[1].trim().replace(/"/g, '') : null // 따옴표 제거
+                        iconPath: iconMatch[1].trim().replace(/"/g, '')
                     };
                 }
-            } catch (e) {
-                // DisplayName이 없는 키는 건너뜁니다.
-                continue;
             }
+        } catch (e) {
+            // 해당 경로에 없으면 다음 루프로 진행
+            continue;
         }
-    } catch (err) {
-        console.error('설치 정보 확인 중 오류:', err.message);
     }
     return { installed: false, iconPath: null };
 }
 
-// 2. 일반 권한 설정 여부 확인
+/**
+ * 2. 현재 설정된 호환성 플래그 확인 (RunAsInvoker 여부)
+ */
 async function checkPrivilegeSetting(exePath) {
     if (!exePath) return false;
     try {
+        // HKCU 영역이므로 관리자 권한 없이 조회 가능
         const { stdout } = await execAsync(`reg query "${COMPAT_PATH}" /v "${exePath}"`);
         return stdout.includes('RunAsInvoker');
     } catch (err) {
@@ -56,22 +64,24 @@ async function checkPrivilegeSetting(exePath) {
     }
 }
 
-// 3. 설정 적용 (reg add)
+/**
+ * 3. 일반 권한 실행 설정 적용
+ */
 async function applyPrivilege(exePath) {
     try {
-        // /t REG_SZ: 타입 지정, /d: 데이터, /f: 강제 덮어쓰기
         await execAsync(`reg add "${COMPAT_PATH}" /v "${exePath}" /t REG_SZ /d "~ RunAsInvoker" /f`);
         console.log('\n✨ 일반 권한 실행 설정이 완료되었습니다.');
     } catch (err) {
-        console.error('\n❌ 설정 실패 (관리자 권한 필요):', err.message);
+        console.error('\n❌ 설정 실패:', err.message);
     }
     await pause();
 }
 
-// 4. 설정 해제 (reg delete)
+/**
+ * 4. 설정 해제
+ */
 async function removePrivilege(exePath) {
     try {
-        // /v: 특정 값만 삭제, /f: 확인 없이 강제 삭제
         await execAsync(`reg delete "${COMPAT_PATH}" /v "${exePath}" /f`);
         console.log('\n✨ 일반 권한 설정이 해제되었습니다.');
     } catch (err) {
@@ -80,10 +90,35 @@ async function removePrivilege(exePath) {
     await pause();
 }
 
+/**
+ * 유틸리티: 화면 일시 정지
+ */
 function pause() {
     return new Promise(resolve => rl.question('\n엔터를 누르면 메인 화면으로 돌아갑니다...', () => resolve()));
 }
 
+/**
+ * 메뉴 인터페이스 구성
+ */
+function showMenu(options) {
+    return new Promise((resolve) => {
+        console.log('\n[ 메뉴 ]');
+        options.forEach((opt, idx) => console.log(`${idx + 1}. ${opt.label}`));
+        rl.question('\n선택: ', async (answer) => {
+            const index = parseInt(answer) - 1;
+            const choice = options[index];
+            if (choice) resolve(await choice.action());
+            else {
+                console.log('잘못된 선택입니다.');
+                setTimeout(() => resolve('continue'), 1000);
+            }
+        });
+    });
+}
+
+/**
+ * 메인 로직 실행
+ */
 async function startApp() {
     while (true) {
         console.clear();
@@ -107,12 +142,12 @@ async function startApp() {
         const menu = [];
         if (!isSet) {
             menu.push({
-                label: '일반 권한 실행 설정',
+                label: '일반 권한 실행 설정 (UAC 건너뛰기)',
                 action: async () => { await applyPrivilege(starter.iconPath); return 'continue'; }
             });
         } else {
             menu.push({
-                label: '권한 설정 해제',
+                label: '권한 설정 해제 (기본값으로 복구)',
                 action: async () => { await removePrivilege(starter.iconPath); return 'continue'; }
             });
         }
@@ -122,22 +157,6 @@ async function startApp() {
         if (result === 'exit') break;
     }
     rl.close();
-}
-
-function showMenu(options) {
-    return new Promise((resolve) => {
-        console.log('\n[ 메뉴 ]');
-        options.forEach((opt, idx) => console.log(`${idx + 1}. ${opt.label}`));
-        rl.question('\n선택: ', async (answer) => {
-            const index = parseInt(answer) - 1;
-            const choice = options[index];
-            if (choice) resolve(await choice.action());
-            else {
-                console.log('잘못된 선택입니다.');
-                setTimeout(() => resolve('continue'), 1000);
-            }
-        });
-    });
 }
 
 startApp();
